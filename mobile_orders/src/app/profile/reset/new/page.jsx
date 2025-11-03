@@ -1,10 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, Eye, EyeOff, Check } from "lucide-react";
 
-/** เช็คความแข็งแรงแบบง่าย ๆ */
+/* ---------- Wrapper to satisfy Next's CSR bailout rule ---------- */
+export default function Page() {
+  return (
+    <Suspense fallback={<div className="p-6 text-slate-500">กำลังโหลด...</div>}>
+      <ResetNewPasswordInner />
+    </Suspense>
+  );
+}
+
+/* ---------------------- Original page logic --------------------- */
 function scorePassword(pw = "") {
   let s = 0;
   if (pw.length >= 8) s++;
@@ -15,12 +24,11 @@ function scorePassword(pw = "") {
   return Math.min(s, 4); // 0..4
 }
 
-export default function ResetNewPasswordPage() {
+function ResetNewPasswordInner() {
   const router = useRouter();
   const sp = useSearchParams();
   const rt = sp.get("rt") || ""; // reset_token ที่ได้จาก verify-otp
 
-  // ถ้าไม่มี token ส่งมา ให้เด้งกลับหน้าเริ่มลืมรหัส
   useEffect(() => {
     if (!rt) router.replace("/profile/reset");
   }, [rt, router]);
@@ -63,7 +71,6 @@ export default function ResetNewPasswordPage() {
       }
 
       setOk("ตั้งรหัสผ่านเรียบร้อย");
-      // กลับไปหน้าเข้าสู่ระบบ
       setTimeout(() => router.replace("/profile?reset=1"), 900);
     } catch (e) {
       setErr(e.message || "เกิดข้อผิดพลาด");
@@ -94,10 +101,7 @@ export default function ResetNewPasswordPage() {
           {/* new password */}
           <label className="block">
             <span className="text-slate-600">รหัสผ่านใหม่</span>
-            <div
-              className="mt-1 flex items-center gap-2 rounded-2xl border px-3"
-              style={{ borderColor: "#E9E9EB" }}
-            >
+            <div className="mt-1 flex items-center gap-2 rounded-2xl border px-3" style={{ borderColor: "#E9E9EB" }}>
               <input
                 type={showPw ? "text" : "password"}
                 value={pw}
@@ -106,11 +110,7 @@ export default function ResetNewPasswordPage() {
                 placeholder="อย่างน้อย 6 ตัวอักษร"
                 autoFocus
               />
-              <button
-                type="button"
-                onClick={() => setShowPw((v) => !v)}
-                className="p-2 rounded-lg hover:bg-slate-100"
-              >
+              <button type="button" onClick={() => setShowPw(v => !v)} className="p-2 rounded-lg hover:bg-slate-100">
                 {showPw ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
               </button>
             </div>
@@ -123,12 +123,7 @@ export default function ResetNewPasswordPage() {
                 className="h-full transition-all"
                 style={{
                   width: `${(strength / 4) * 100}%`,
-                  background:
-                    strength >= 3
-                      ? "#10B981" // strong (emerald)
-                      : strength === 2
-                      ? "#F59E0B" // medium (amber)
-                      : "#EF4444", // weak (rose)
+                  background: strength >= 3 ? "#10B981" : strength === 2 ? "#F59E0B" : "#EF4444",
                 }}
               />
             </div>
@@ -140,10 +135,7 @@ export default function ResetNewPasswordPage() {
           {/* confirm */}
           <label className="block">
             <span className="text-slate-600">ยืนยันรหัสผ่านใหม่</span>
-            <div
-              className="mt-1 flex items-center gap-2 rounded-2xl border px-3"
-              style={{ borderColor: "#E9E9EB" }}
-            >
+            <div className="mt-1 flex items-center gap-2 rounded-2xl border px-3" style={{ borderColor: "#E9E9EB" }}>
               <input
                 type={showPw2 ? "text" : "password"}
                 value={pw2}
@@ -151,17 +143,11 @@ export default function ResetNewPasswordPage() {
                 className="w-full h-12 bg-transparent outline-none"
                 placeholder="พิมพ์ซ้ำอีกครั้ง"
               />
-              <button
-                type="button"
-                onClick={() => setShowPw2((v) => !v)}
-                className="p-2 rounded-lg hover:bg-slate-100"
-              >
+              <button type="button" onClick={() => setShowPw2(v => !v)} className="p-2 rounded-lg hover:bg-slate-100">
                 {showPw2 ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
               </button>
             </div>
-            {pw2 && pw !== pw2 && (
-              <div className="text-rose-600 text-sm mt-2">รหัสผ่านยืนยันไม่ตรงกัน</div>
-            )}
+            {pw2 && pw !== pw2 && <div className="text-rose-600 text-sm mt-2">รหัสผ่านยืนยันไม่ตรงกัน</div>}
           </label>
 
           {!!ok && (
@@ -187,7 +173,6 @@ export default function ResetNewPasswordPage() {
           </button>
         </form>
 
-        {/* ปุ่มกลับไปหน้าล็อกอิน */}
         <div className="text-center mt-6">
           <button
             type="button"

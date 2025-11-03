@@ -7,15 +7,7 @@ import {
   CircleAlert, Eye, ReceiptText,
 } from "lucide-react";
 
-async function safeJsonFetch(url) {
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error((await r.text().catch(()=>"")) || `HTTP ${r.status}`);
-  const ct = r.headers.get("content-type") || "";
-  if (!ct.includes("application/json")) throw new Error("Bad content-type");
-  return r.json();
-}
-
-/* --- Badges --- */
+/* ------------------------- Badges ------------------------- */
 function StatusBadge({ value }) {
   const v = String(value || "").toLowerCase();
   const map = {
@@ -49,6 +41,44 @@ function PayBadge({ value }) {
   );
 }
 
+/* -------------------- ETag + Fingerprint ------------------- */
+const etagCache = new Map(); // key -> { etag, data, fp }
+function fpList(list) {
+  if (!Array.isArray(list)) return "";
+  // ใช้ฟิลด์ที่มีผลกับการแสดงผลเป็นหลัก เพื่อลดการเปลี่ยน fp โดยไม่จำเป็น
+  return list.map(o => [
+    o.id, o.order_code, o.table_no, o.items_count,
+    String(o.status || ""), String(o.payment_status || ""),
+    o.created_at ? new Date(o.created_at).getTime() : 0
+  ].join("|")).join(";");
+}
+async function fetchJSONWithETag(url, { signal } = {}) {
+  const cached = etagCache.get(url) || {};
+  const headers = {};
+  if (cached.etag) headers["If-None-Match"] = cached.etag;
+
+  const res = await fetch(url, { cache: "no-store", headers, signal });
+  // 304 → คืน reference เดิม (จะไม่ก่อให้เกิด re-render)
+  if (res.status === 304 && cached.data) return cached.data;
+
+  const ct = res.headers.get("content-type") || "";
+  const text = await res.text().catch(() => "");
+  if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
+  if (!ct.includes("application/json")) throw new Error("Bad content-type");
+  const json = JSON.parse(text);
+
+  const nextEtag = res.headers.get("etag") || null;
+  const nextFp = fpList(json?.items || json?.data || []);
+  const prevFp = cached.fp;
+
+  // ถ้าไม่มี ETag แต่ fingerprint เท่าเดิม → คืน reference เดิม
+  if (!nextEtag && prevFp && prevFp === nextFp && cached.data) return cached.data;
+
+  etagCache.set(url, { etag: nextEtag, data: json, fp: nextFp });
+  return json;
+}
+
+/* -------------------------- Page -------------------------- */
 export default function OrdersPage() {
   const [items, setItems]   = useState([]);
   const [q, setQ]           = useState("");
@@ -57,44 +87,71 @@ export default function OrdersPage() {
   const [pageSize]          = useState(20);
   const [total, setTotal]   = useState(0);
   const [err, setErr]       = useState("");
+
   const pages = useMemo(() => Math.max(1, Math.ceil(total / pageSize)), [total, pageSize]);
-  const loadingRef = useRef(false);
+  const loadingRef   = useRef(false);
+  const lastFpRef    = useRef("");
+  const abortRef     = useRef(null);
+
+  const url = useMemo(() => {
+    const params = new URLSearchParams({
+      page: String(page),
+      pageSize: String(pageSize),
+      hidePaid: "1",
+    });
+    if (q) params.set("q", q);
+    if (status) params.set("status", status);
+    return `/api/orders?${params.toString()}`;
+  }, [page, pageSize, q, status]);
 
   const load = useCallback(async () => {
     if (loadingRef.current) return;
-    try {
-      loadingRef.current = true;
-      setErr("");
-      const params = new URLSearchParams({
-        page: String(page),
-        pageSize: String(pageSize),
-        hidePaid: "1",
-      });
-      if (q) params.set("q", q);
-      if (status) params.set("status", status);
+    loadingRef.current = true;
+    if (abortRef.current) abortRef.current.abort();
+    const ctr = new AbortController();
+    abortRef.current = ctr;
 
-      const res = await safeJsonFetch(`/api/orders?${params.toString()}`);
-      if (res.ok) {
-        const list = (res.items || []).filter(
-          (o) => String(o.payment_status).toUpperCase() !== "PAID"
-        );
-        setItems(list);
-        setTotal(Number(res.total ?? list.length ?? 0));
+    try {
+      setErr("");
+      const res = await fetchJSONWithETag(url, { signal: ctr.signal });
+      if (res?.ok) {
+        // filter ออก PAID ฝั่งคลายเอนต์ (กันหน้าแสดง)
+        const list = (res.items || []).filter(o => String(o.payment_status || "").toUpperCase() !== "PAID");
+        const nextFp = fpList(list);
+        if (nextFp !== lastFpRef.current) {
+          lastFpRef.current = nextFp;
+          setItems(list);
+          setTotal(Number(res.total ?? list.length ?? 0));
+        }
       }
     } catch (e) {
-      setErr(e.message || "โหลดข้อมูลไม่สำเร็จ");
+      if (e?.name !== "AbortError") setErr(e.message || "โหลดข้อมูลไม่สำเร็จ");
     } finally {
+      if (abortRef.current === ctr) abortRef.current = null;
       loadingRef.current = false;
     }
-  }, [page, pageSize, q, status]);
+  }, [url]);
 
-  useEffect(() => { load(); }, [page, pageSize, status, load]);
+  // โหลดเมื่อ page/status เปลี่ยน
+  useEffect(() => { load(); }, [load]);
 
-  // ค้นหาอัตโนมัติ (debounce) และรองรับกด Enter
+  // ค้นหาแบบ debounce + รีหน้าเป็นหน้า 1
   useEffect(() => {
     const t = setTimeout(() => { setPage(1); load(); }, 350);
     return () => clearTimeout(t);
   }, [q, load]);
+
+// เพิ่มใต้ useEffect visibilitychange เดิม (หรือรวมกันก็ได้)
+  useEffect(() => {
+    let t;
+    const start = () => { if (!t) t = setInterval(() => { if (!document.hidden) load(); }, 5000); }; // ทุก 5s
+    const stop  = () => { if (t) { clearInterval(t); t = null; } };
+
+    start();
+    document.addEventListener("visibilitychange", () => document.hidden ? stop() : start());
+    return () => { stop(); document.removeEventListener("visibilitychange", () => {}); };
+  }, [load]);
+
 
   return (
     <div className="p-4 md:p-6">
@@ -112,7 +169,7 @@ export default function OrdersPage() {
           </div>
         </div>
 
-        {/* Controls (ไม่มีปุ่มค้นหาแล้ว) */}
+        {/* Controls */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative">
             <input

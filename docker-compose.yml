@@ -1,0 +1,74 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: restaurant_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-restaurant_db}
+      MYSQL_USER: ${MYSQL_USER:-morning}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-kitsada}
+    ports: ["3307:3306"]
+    command:
+      ["--character-set-server=utf8mb4","--collation-server=utf8mb4_unicode_ci","--default-authentication-plugin=mysql_native_password"]
+    volumes:
+      - dbdata:/var/lib/mysql
+      - ./seed:/docker-entrypoint-initdb.d:ro
+    healthcheck:                                 # ✅ รอ DB พร้อม
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -prootpass || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: restaurant_phpmyadmin
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports: ["8080:80"]
+    environment:
+      PMA_HOST: db
+      PMA_USER: ${MYSQL_USER:-morning}
+      PMA_PASSWORD: ${MYSQL_PASSWORD:-kitsada}
+      UPLOAD_LIMIT: 256M
+
+  dashboard:
+    image: veerct/online_food_ordering_dashboard:latest
+    container_name: restaurant_dashboard
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: ${PORT:-3000}
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USER: ${DB_USER:-morning}
+      DB_PASSWORD: ${DB_PASSWORD:-kitsada}
+      DB_DATABASE: ${DB_DATABASE:-restaurant_db}
+    ports: ["3000:3000"]
+    command: ["npx","next","start","-p","3000"]
+
+  mobile:
+    image: veerct/online_food_ordering_mobile:latest
+    container_name: restaurant_mobile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: ${PORT:-3000}
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USER: ${DB_USER:-morning}
+      DB_PASSWORD: ${DB_PASSWORD:-kitsada}
+      DB_DATABASE: ${DB_DATABASE:-restaurant_db}
+    ports: ["3001:3000"]
+    command: ["npx","next","start","-p","3000"]
+
+volumes:
+  dbdata:

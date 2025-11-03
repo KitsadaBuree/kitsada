@@ -19,11 +19,16 @@ function buildSort(sp) {
 // ---- GET /api/staff ----
 export async function GET(req) {
   const { searchParams } = new URL(req.url);
-  const role = (searchParams.get("role") || "").trim().toLowerCase(); // '', member, kitchen, manager
+  const role = (searchParams.get("role") || "").trim().toLowerCase(); // '', member, kitchen, manager, employee
   const q = (searchParams.get("q") || "").trim();
+
+  // ทำให้เป็นเลขปลอดภัย แล้วอินไลน์ลง SQL (หลีกเลี่ยง LIMIT ? OFFSET ?)
   const page = Math.max(1, Number(searchParams.get("page") || 1));
   const pageSize = Math.min(50, Math.max(1, Number(searchParams.get("pageSize") || 10)));
   const offset = (page - 1) * pageSize;
+  const LIMIT_SQL = String(parseInt(pageSize, 10));
+  const OFFSET_SQL = String(parseInt(offset, 10));
+
   const orderBy = buildSort(searchParams);
 
   const where = [];
@@ -32,6 +37,7 @@ export async function GET(req) {
   // แสดงเฉพาะ role ที่เป็นพนักงาน
   where.push("u.role IN ('manager','kitchen','member','employee')");
   if (role) { where.push("u.role = ?"); args.push(role); }
+
   if (q) {
     where.push("(u.name LIKE ? OR u.email LIKE ? OR u.phone LIKE ? OR e.employee_code LIKE ?)");
     const like = `%${q}%`;
@@ -39,8 +45,8 @@ export async function GET(req) {
   }
   const whereSQL = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  const rows = await query(
-    `
+  // รายการ (อินไลน์ LIMIT/OFFSET)
+  const listSql = `
     SELECT
       u.id, u.name, u.email, u.phone, u.role, u.created_at,
       e.employee_code, e.hire_date, e.status
@@ -48,20 +54,18 @@ export async function GET(req) {
     LEFT JOIN employees e ON e.user_id = u.id
     ${whereSQL}
     ORDER BY ${orderBy}
-    LIMIT ? OFFSET ?
-    `,
-    [...args, pageSize, offset]
-  );
+    LIMIT ${LIMIT_SQL} OFFSET ${OFFSET_SQL}
+  `;
+  const rows = await query(listSql, args);
 
-  const [{ total } = { total: 0 }] = await query(
-    `
+  // นับรวม
+  const countSql = `
     SELECT COUNT(*) AS total
     FROM users u
     LEFT JOIN employees e ON e.user_id = u.id
     ${whereSQL}
-    `,
-    args
-  );
+  `;
+  const [{ total } = { total: 0 }] = await query(countSql, args);
 
   return Response.json({
     ok: true,
@@ -93,6 +97,7 @@ export async function POST(req) {
   if (!password)
     return Response.json({ ok:false, error:"กรุณากรอกรหัสผ่าน" }, { status:400 });
 
+  // กันซ้ำอีเมล
   const dupe = await query(`SELECT id FROM users WHERE email = ? LIMIT 1`, [email]);
   if (dupe.length) return Response.json({ ok:false, error:"อีเมลนี้ถูกใช้แล้ว" }, { status:409 });
 

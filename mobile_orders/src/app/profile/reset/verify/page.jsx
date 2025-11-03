@@ -1,10 +1,20 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { Suspense, useState, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 
-export default function VerifyOtpOnlyPage() {
+/* ------- Wrapper to satisfy Next's CSR bailout rule ------- */
+export default function VerifyOtpPage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-slate-500">กำลังโหลด...</div>}>
+      <VerifyOtpOnlyPage />
+    </Suspense>
+  );
+}
+
+/* ------- Your original client component ------- */
+function VerifyOtpOnlyPage() {
   const router = useRouter();
   const sp = useSearchParams();
   const uid = sp.get("uid") || "";
@@ -52,23 +62,20 @@ export default function VerifyOtpOnlyPage() {
       const j = await r.json().catch(() => ({}));
 
       if (!r.ok || !j?.ok) {
-        // ทำเป็นตัวพิมพ์เล็กไว้แม็พง่าย ๆ
         const key = String(j?.error || "").toLowerCase();
         const map = {
-          // รองรับทั้งสองชุดชื่อ error
-          "otp_wrong": "รหัส OTP ไม่ถูกต้อง",
-          "otp_invalid": "รหัส OTP ไม่ถูกต้อง",
-          "otp_expired": "รหัส OTP หมดอายุ",
-          "otp_locked": "ใส่ผิดหลายครั้งเกินไป ลองใหม่ภายหลัง",
-          "otp_not_found": "ยังไม่ได้ขอรหัส OTP หรือรหัสนี้ถูกยกเลิก",
-          "otp_not_issued": "ยังไม่ได้ขอรหัส OTP",
-          "otp_used": "รหัสนี้ถูกใช้งานแล้ว",
-          "invalid_input": "ข้อมูลไม่ถูกต้อง",
+          otp_wrong: "รหัส OTP ไม่ถูกต้อง",
+          otp_invalid: "รหัส OTP ไม่ถูกต้อง",
+          otp_expired: "รหัส OTP หมดอายุ",
+          otp_locked: "ใส่ผิดหลายครั้งเกินไป ลองใหม่ภายหลัง",
+          otp_not_found: "ยังไม่ได้ขอรหัส OTP หรือรหัสนี้ถูกยกเลิก",
+          otp_not_issued: "ยังไม่ได้ขอรหัส OTP",
+          otp_used: "รหัสดังกล่าวถูกใช้งานแล้ว",
+          invalid_input: "ข้อมูลไม่ถูกต้อง",
         };
         throw new Error(map[key] || "ตรวจรหัสไม่สำเร็จ");
       }
 
-      // อ่าน reset_token ให้ครอบคลุมทั้งสองฟอร์แมต
       const rt = j.data?.reset_token || j.reset_token;
       if (!rt) throw new Error("ไม่มี reset token กรุณาลองใหม่");
 
@@ -120,18 +127,12 @@ export default function VerifyOtpOnlyPage() {
           </label>
 
           {!!msg && (
-            <div
-              className="px-4 py-2 rounded-xl text-sm"
-              style={{ background: "#ECFDF5", color: "#065F46" }}
-            >
+            <div className="px-4 py-2 rounded-xl text-sm" style={{ background: "#ECFDF5", color: "#065F46" }}>
               {msg}
             </div>
           )}
           {!!err && (
-            <div
-              className="px-4 py-2 rounded-xl text-sm"
-              style={{ background: "#FEF2F2", color: "#B91C1C" }}
-            >
+            <div className="px-4 py-2 rounded-xl text-sm" style={{ background: "#FEF2F2", color: "#B91C1C" }}>
               {err}
             </div>
           )}

@@ -1,13 +1,14 @@
 // src/app/profile/page.jsx
 "use client";
 
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, Mail, Lock } from "lucide-react";
 import useAuth from "../api/hooks/useAuth";
 
-export default function ProfilePage() {
+/** แยกเนื้อในที่ใช้ useSearchParams ออกมาไว้ใน Body แล้วครอบด้วย <Suspense> ด้านนอก */
+function ProfileBody() {
   const router = useRouter();
   const q = useSearchParams();
   const justRegistered = q.get("registered") === "1";
@@ -20,7 +21,6 @@ export default function ProfilePage() {
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState("");
 
-  // ถ้าล็อกอินอยู่แล้ว → ไปหน้าที่กำหนด
   useEffect(() => {
     if (!loading && user) router.replace(next);
   }, [loading, user, router, next]);
@@ -47,7 +47,7 @@ export default function ProfilePage() {
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j?.ok) throw new Error(j?.error || "LOGIN_FAILED");
       await refresh();
-      router.replace(next); // ← ไปปลายทางที่ตั้งใจ
+      router.replace(next);
     } catch (e2) {
       setErr(e2.message || "LOGIN_FAILED");
     } finally {
@@ -55,9 +55,7 @@ export default function ProfilePage() {
     }
   }
 
-  const onBack = () => {
-    router.replace("/");   // ใช้ replace เพื่อลบหน้าปัจจุบันออกจาก history
-  };
+  const onBack = () => router.replace("/");
 
   return (
     <div className="min-h-dvh bg-white flex flex-col">
@@ -128,13 +126,19 @@ export default function ProfilePage() {
               {errorText}
             </div>
           )}
-          {/* ... เหนือปุ่มเข้าสู่ระบบ */}
-            <div className="flex justify-end -mt-2">
-              <a href="/profile/reset" className="text-sm text-[#F4935E] hover:underline">
-                ลืมรหัสผ่าน?
-              </a>
-            </div>
-          <button type="submit" disabled={submitting} className="mt-2 h-14 rounded-2xl text-white text-lg font-semibold disabled:opacity-60" style={{ background: "#9A9A9A" }}>
+
+          <div className="flex justify-end -mt-2">
+            <a href="/profile/reset" className="text-sm text-[#F4935E] hover:underline">
+              ลืมรหัสผ่าน?
+            </a>
+          </div>
+
+          <button
+            type="submit"
+            disabled={submitting}
+            className="mt-2 h-14 rounded-2xl text-white text-lg font-semibold disabled:opacity-60"
+            style={{ background: "#9A9A9A" }}
+          >
             {submitting ? "กำลังเข้าสู่ระบบ..." : "เข้าสู่ระบบ"}
           </button>
 
@@ -149,5 +153,15 @@ export default function ProfilePage() {
         </form>
       )}
     </div>
+  );
+}
+
+export const dynamic = "force-dynamic"; // กันการ prerender แบบ static
+
+export default function ProfilePage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-slate-500">กำลังโหลด...</div>}>
+      <ProfileBody />
+    </Suspense>
   );
 }

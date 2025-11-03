@@ -1,11 +1,15 @@
 // src/app/checkout/page.jsx
 "use client";
 
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { Suspense, useEffect, useState, useMemo, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import BillClient from "../../../components/BillClient";
 
-export default function Page() {
+// กันการ prerender ตอน build (ที่ทำให้ Turbopack ล้ม)
+export const dynamic = "force-dynamic";
+
+/* ---------- เนื้อหาเดิมทั้งหมด ถูกย้ายมาไว้ในคอมโพเนนต์นี้ ---------- */
+function CheckoutInner() {
   const searchParams = useSearchParams();
   const router = useRouter();
 
@@ -89,7 +93,7 @@ export default function Page() {
         const rawRate = Number(data?.order?.service_rate);
         const rate = Number.isFinite(rawRate)
           ? (rawRate > 1 ? rawRate / 100 : rawRate)
-          : 0.025; // fallback 2.5%
+          : 0.025;
 
         const codeStr = String(data?.order?.order_code || code || "");
 
@@ -98,7 +102,7 @@ export default function Page() {
         setServiceRate(rate);
         setOrderCode(codeStr);
 
-        // 3) เก็บ snapshot ให้สอดคล้องกับ URL (เขียนทับด้วย tableParam ถ้ามี)
+        // 3) snapshot สำหรับหน้า Bill
         try {
           const sub = nextItems.reduce((s, it) => s + it.qty * it.unit_price, 0);
           const chg = Number((sub * rate).toFixed(2));
@@ -125,8 +129,8 @@ export default function Page() {
       }
     })();
 
-    return () => { alive = false; };
-  }, [codeParam, tableParam]); // เปลี่ยนเมื่อพารามิเตอร์ URL เปลี่ยน
+  return () => { alive = false; };
+  }, [codeParam, tableParam]);
 
   // ยืนยันเช็คบิล
   const handleRequestBill = useCallback(async () => {
@@ -159,5 +163,14 @@ export default function Page() {
       onCloseHref="/orders"
       onConfirm={handleRequestBill}
     />
+  );
+}
+
+/* -------------------------- หน้าหลัก -------------------------- */
+export default function Page() {
+  return (
+    <Suspense fallback={<div className="p-6 text-slate-500 text-center">กำลังโหลด…</div>}>
+      <CheckoutInner />
+    </Suspense>
   );
 }

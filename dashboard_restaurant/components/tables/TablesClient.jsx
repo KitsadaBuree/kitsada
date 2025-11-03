@@ -1,6 +1,6 @@
 // components/tables/TablesClient.jsx
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Plus, Search, QrCode, Download, Trash2, CheckSquare, X } from "lucide-react";
 import TableQrModal from "./TablesQrMordal";
 import TableCreateModal from "./TableCreateModal";
@@ -16,16 +16,16 @@ const STATUS = {
 function normalizeStatus(row) {
   const openCount = Number(
     row.open_orders ??
-    row.open_orders_count ??
-    row.openCount ??
-    row.orders_open ??
-    0
+      row.open_orders_count ??
+      row.openCount ??
+      row.orders_open ??
+      0
   );
   const lastStatus = String(
     row.last_order_status ??
-    row.last_payment_status ??
-    row.payment_status ??
-    ""
+      row.last_payment_status ??
+      row.payment_status ??
+      ""
   ).toUpperCase();
 
   const isBusy = openCount > 0 || ["UNPAID", "CHECKING"].includes(lastStatus);
@@ -43,58 +43,124 @@ async function safeJson(res) {
   }
 }
 
+/* ---- ETag cache + fingerprint กัน re-render เกินจำเป็น ---- */
+const etagCache = new Map(); // url -> { etag, data, fp }
+function fpTables(rows) {
+  if (!Array.isArray(rows)) return "";
+  return rows
+    .map((r) => [r.id, r.code, r.number, r.status].join("|"))
+    .join(";");
+}
+async function fetchJSONWithETag(url, { signal } = {}) {
+  const cached = etagCache.get(url) || {};
+  const headers = {};
+  if (cached.etag) headers["If-None-Match"] = cached.etag;
+
+  const res = await fetch(url, { cache: "no-store", headers, signal });
+  if (res.status === 304 && cached.data) return cached.data;
+
+  const ct = res.headers.get("content-type") || "";
+  const text = await res.text().catch(() => "");
+  if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
+  if (!ct.includes("application/json")) throw new Error("Bad content-type");
+  const json = JSON.parse(text);
+
+  const nextEtag = res.headers.get("etag") || null;
+  const nextFp = fpTables(json?.data || json?.items || []);
+  const prevFp = cached.fp;
+
+  if (!nextEtag && prevFp && prevFp === nextFp && cached.data) return cached.data;
+
+  etagCache.set(url, { etag: nextEtag, data: json, fp: nextFp });
+  return json;
+}
+
 export default function TablesClient() {
   const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState([]);
   const [q, setQ] = useState("");
-  const [filter, setFilter] = useState("");      // '', 'free','busy'
+  const [filter, setFilter] = useState(""); // '', 'free','busy'
   const [qrOpen, setQrOpen] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const confirm = useConfirm();
 
-  async function loadTables() {
+  const abortRef = useRef(null);
+  const loadingRef = useRef(false);
+  const lastFpRef = useRef("");
+
+  const mapRow = (r) => {
+    const rawNum =
+      r.number !== undefined && r.number !== null
+        ? r.number
+        : r.name !== undefined && r.name !== null
+        ? r.name
+        : "";
+
+    const number =
+      typeof rawNum === "number" ? rawNum : Number(rawNum) || String(rawNum) || "";
+
+    return {
+      id: r.id,
+      code: r.code || r.table_code || "",
+      number,
+      // ✅ ใช้ normalizeStatus จริง ๆ
+      status: normalizeStatus(r),
+    };
+  };
+
+  const loadTables = useCallback(async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    if (abortRef.current) abortRef.current.abort();
+    const ctr = new AbortController();
+    abortRef.current = ctr;
+
     try {
-      setLoading(true);
-      const res = await fetch("/api/tables", { cache: "no-store" });
-      const json = await safeJson(res);
-      if (!res.ok || !json?.ok) {
-        const msg = json?.error || `โหลดข้อมูลไม่สำเร็จ (HTTP ${res.status})`;
-        throw new Error(msg);
+      if (!rows.length) setLoading(true);
+      const json = await fetchJSONWithETag("/api/tables", { signal: ctr.signal });
+
+      if (!json?.ok) throw new Error(json?.error || "โหลดข้อมูลไม่สำเร็จ");
+
+      const mapped = (json.data || []).map(mapRow);
+      const nextFp = fpTables(mapped);
+      if (nextFp !== lastFpRef.current) {
+        lastFpRef.current = nextFp;
+        setRows(mapped);
       }
-      
-      const mapped = (json.data || []).map((r) => {
-        const rawNum = (r.number !== undefined && r.number !== null)
-          ? r.number
-          : (r.name !== undefined && r.name !== null ? r.name : "");
-
-        return {
-          id: r.id,
-          code: r.code || r.table_code || "",
-          number: (typeof rawNum === "number") ? rawNum : (Number(rawNum) || String(rawNum) || ""),
-          // ถ้ามีออเดอร์ UNPAID/CHECKING = มีออเดอร์, ไม่งั้น = ว่าง
-          status: r.open_orders > 0 ? "busy" : "free",
-        };
-      });
-      setRows(mapped);
-
     } catch (e) {
-      console.error(e);
-      alert(e?.message || "โหลดข้อมูลไม่สำเร็จ");
-      setRows([]);
+      if (e?.name !== "AbortError") {
+        console.error(e);
+        alert(e?.message || "โหลดข้อมูลไม่สำเร็จ");
+        setRows([]);
+      }
     } finally {
+      if (abortRef.current === ctr) abortRef.current = null;
       setLoading(false);
+      loadingRef.current = false;
     }
-  }
+  }, [rows.length]);
 
+  // โหลดครั้งแรก
   useEffect(() => {
     loadTables();
-    const t = setInterval(loadTables, 10000);
-    return () => clearInterval(t);
-  }, []);
+  }, [loadTables]);
+
+  // โพลลิ่งทุก 10s เฉพาะตอนแท็บโฟกัส
+  useEffect(() => {
+    let timer;
+    const start = () => {
+      if (!timer) timer = setInterval(() => { if (!document.hidden) loadTables(); }, 10_000);
+    };
+    const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+    start();
+    const onVis = () => (document.hidden ? stop() : start());
+    document.addEventListener("visibilitychange", onVis);
+    return () => { stop(); document.removeEventListener("visibilitychange", onVis); };
+  }, [loadTables]);
 
   const shown = useMemo(() => {
-    return rows.filter(r => {
+    return rows.filter((r) => {
       const passQ =
         !q ||
         String(r.number).includes(q) ||
@@ -105,13 +171,13 @@ export default function TablesClient() {
   }, [rows, q, filter]);
 
   function toggleSelect(id) {
-    setSelected(prev => {
+    setSelected((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
   }
-  function selectAllCurrent() { setSelected(new Set(shown.map(r => r.id))); }
+  function selectAllCurrent() { setSelected(new Set(shown.map((r) => r.id))); }
   function clearSelection() { setSelected(new Set()); }
 
   async function handleDeleteOne(id) {
@@ -127,7 +193,7 @@ export default function TablesClient() {
       const json = await safeJson(res);
       if (!res.ok || !json?.ok) throw new Error(json?.error || "ลบไม่สำเร็จ");
       await loadTables();
-      setSelected(s => { const n = new Set(s); n.delete(id); return n; });
+      setSelected((s) => { const n = new Set(s); n.delete(id); return n; });
     } catch (e) {
       alert(e?.message || "ลบไม่สำเร็จ");
     }
@@ -167,7 +233,7 @@ export default function TablesClient() {
           <div className="relative w-full sm:w-[420px]">
             <input
               value={q}
-              onChange={(e)=>setQ(e.target.value)}
+              onChange={(e) => setQ(e.target.value)}
               placeholder="ค้นหา: เลขโต๊ะ หรือ CODE"
               className="w-full rounded-xl bg-slate-50 border border-slate-200 pl-10 pr-3 py-2.5 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-4 focus:ring-orange-200 focus:border-orange-400"
             />
@@ -176,7 +242,7 @@ export default function TablesClient() {
 
           <div className="flex items-center gap-2">
             <button
-              onClick={()=>setCreateOpen(true)}
+              onClick={() => setCreateOpen(true)}
               className="inline-flex items-center gap-2 h-10 rounded-full bg-orange-500 px-4 text-white hover:bg-orange-600 shadow-sm"
             >
               <Plus className="h-4 w-4" /> เพิ่มโต๊ะ
@@ -191,22 +257,24 @@ export default function TablesClient() {
           </div>
         </div>
 
-        {/* segmented filter + counter (ตัด 'ปิดใช้งาน' ออก) */}
+        {/* segmented filter */}
         <div className="flex items-center gap-2 justify-between">
           <div className="inline-flex rounded-full border border-slate-200 bg-white p-1">
             {[
-              ["","ทั้งหมด"],
-              ["free","ว่าง"],
-              ["busy","มีออเดอร์"],
+              ["", "ทั้งหมด"],
+              ["free", "ว่าง"],
+              ["busy", "มีออเดอร์"],
             ].map(([k, lb]) => {
               const active = filter === k;
               return (
                 <button
                   key={k || "all"}
-                  onClick={()=>setFilter(k)}
+                  onClick={() => setFilter(k)}
                   className={`px-3.5 py-1.5 text-sm rounded-full transition
                     ${active ? "bg-orange-500 text-white shadow-sm" : "text-slate-700 hover:bg-slate-50"}`}
-                >{lb}</button>
+                >
+                  {lb}
+                </button>
               );
             })}
           </div>
@@ -221,22 +289,22 @@ export default function TablesClient() {
       <div className="p-4 sm:p-5">
         {loading ? (
           <div className="grid [grid-template-columns:repeat(auto-fit,minmax(360px,1fr))] gap-4">
-            {Array.from({length:6}).map((_,i)=>(
+            {Array.from({ length: 6 }).map((_, i) => (
               <div key={i} className="h-[150px] rounded-2xl bg-slate-100 animate-pulse" />
             ))}
           </div>
         ) : shown.length === 0 ? (
-          <EmptyState onCreate={()=>setCreateOpen(true)} />
+          <EmptyState onCreate={() => setCreateOpen(true)} />
         ) : (
           <div className="grid [grid-template-columns:repeat(auto-fit,minmax(360px,1fr))] gap-4">
-            {shown.map(r=>(
+            {shown.map((r) => (
               <TableCard
                 key={r.id}
                 row={r}
                 checked={selected.has(r.id)}
-                onCheck={()=>toggleSelect(r.id)}
-                onShowQr={()=>setQrOpen(r)}
-                onDelete={()=>handleDeleteOne(r.id)}
+                onCheck={() => toggleSelect(r.id)}
+                onShowQr={() => setQrOpen(r)}
+                onDelete={() => handleDeleteOne(r.id)}
               />
             ))}
           </div>
@@ -271,12 +339,8 @@ export default function TablesClient() {
       )}
 
       {/* Modals */}
-      <TableQrModal open={!!qrOpen} row={qrOpen} onClose={()=>setQrOpen(null)} />
-      <TableCreateModal
-        open={createOpen}
-        onClose={()=>setCreateOpen(false)}
-        onCreated={loadTables}
-      />
+      <TableQrModal open={!!qrOpen} row={qrOpen} onClose={() => setQrOpen(null)} />
+      <TableCreateModal open={createOpen} onClose={() => setCreateOpen(false)} onCreated={loadTables} />
       <confirm.Render />
     </div>
   );

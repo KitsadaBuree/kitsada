@@ -1,64 +1,59 @@
 // src/app/(dasboard)/dashboard/orders_done/page.jsx
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 
-/* fetch helper */
-async function safeJsonFetch(url, init) {
-  const r = await fetch(url, { cache: "no-store", ...init });
-  const ct = r.headers.get("content-type") || "";
-  const isJson = ct.includes("application/json");
-  if (!r.ok) {
-    if (isJson) {
-      const j = await r.json().catch(() => ({}));
-      throw new Error(j.error || `HTTP ${r.status}`);
-    }
-    throw new Error(`HTTP ${r.status} – ไม่พบปลายทางหรือมีข้อผิดพลาด`);
-  }
-  if (!isJson) throw new Error("Bad content-type");
-  return r.json();
+/* ------------ ETag cache + fingerprint ของรายการ ------------ */
+const etagCache = new Map(); // key -> { etag, data, fp }
+
+function fpList(list) {
+  if (!Array.isArray(list)) return "";
+  // ใช้เฉพาะฟิลด์ที่มีผลกับ UI
+  return list.map(it => [
+    it.id, it.order_code, it.table_no, it.items_count,
+    String(it.payment_status || ""), // CHECKING/PAID/UNPAID
+    it.closed_at ? new Date(it.closed_at).getTime() : 0,
+    Number(it.total || 0)
+  ].join("|")).join(";");
 }
 
-/* icons */
-const IconReceipt = (p) => (
-  <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M6 2v20l3-2 3 2 3-2 3 2V2z" />
-    <path d="M8 6h8M8 10h8M8 14h6" />
-  </svg>
-);
-const IconClock = (p) => (
-  <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <circle cx="12" cy="12" r="10" />
-    <path d="M12 6v6l4 2" />
-  </svg>
-);
-const IconCheck = (p) => (
-  <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M20 7l-9 9-4-4" />
-  </svg>
-);
-const IconShield = (p) => (
-  <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M12 22s8-4 8-10V6l-8-4-8 4v6c0 6 8 10 8 10z" />
-  </svg>
-);
+async function fetchJSONWithETag(url, { signal } = {}) {
+  const cached = etagCache.get(url) || {};
+  const headers = {};
+  if (cached.etag) headers["If-None-Match"] = cached.etag;
 
-/* Member cell */
+  const res = await fetch(url, { cache: "no-store", headers, signal });
+  // เซิร์ฟเวอร์ตอบ 304 → ใช้ reference เดิม (ไม่ re-render)
+  if (res.status === 304 && cached.data) return cached.data;
+
+  const ct = res.headers.get("content-type") || "";
+  const txt = await res.text().catch(() => "");
+  if (!res.ok) throw new Error(txt || `HTTP ${res.status}`);
+  if (!ct.includes("application/json")) throw new Error("Bad content-type");
+
+  const json = JSON.parse(txt);
+  const nextEtag = res.headers.get("etag") || null;
+  const nextFp   = fpList(json?.items || json?.data || []);
+  const prevFp   = cached.fp;
+
+  // ถ้าไม่มี ETag แต่ fingerprint เท่าเดิม → คืน reference เดิม
+  if (!nextEtag && prevFp && prevFp === nextFp && cached.data) return cached.data;
+
+  etagCache.set(url, { etag: nextEtag, data: json, fp: nextFp });
+  return json;
+}
+
+/* ------------------------- Icons ------------------------- */
+const IconReceipt = (p) => (<svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 2v20l3-2 3 2 3-2 3 2V2z"/><path d="M8 6h8M8 10h8M8 14h6"/></svg>);
+const IconClock   = (p) => (<svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>);
+const IconCheck   = (p) => (<svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 7l-9 9-4-4"/></svg>);
+const IconShield  = (p) => (<svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V6l-8-4-8 4v6c0 6 8 10 8 10z"/></svg>);
+
+/* --------------------- Member cell ---------------------- */
 function MemberCell({ row }) {
   const name =
-    row.member_name ||
-    row.customer_name ||
-    row.user_fullname ||
-    row.user_name ||
-    row.name ||
-    "-";
-
+    row.member_name || row.customer_name || row.user_fullname || row.user_name || row.name || "-";
   const email =
-    row.member_email ||
-    row.customer_email ||
-    row.user_email ||
-    row.email ||
-    "";
-
+    row.member_email || row.customer_email || row.user_email || row.email || "";
   return (
     <div className="min-w-0">
       <div className="truncate">{name}</div>
@@ -67,36 +62,65 @@ function MemberCell({ row }) {
   );
 }
 
+/* --------------------------- Page --------------------------- */
 export default function OrdersDonePage() {
   const [q, setQ] = useState("");
   const [items, setItems] = useState([]);
   const [err, setErr] = useState("");
 
-  // load ที่รับ AbortSignal (เผื่อยกเลิกตอน debounce)
-  const load = async (signal) => {
+  const abortRef   = useRef(null);
+  const loadingRef = useRef(false);
+  const lastFpRef  = useRef("");
+
+  const url = useMemo(() => {
+    const sp = new URLSearchParams();
+    sp.set("payment", "CHECKING");          // โชว์เฉพาะที่รอตรวจสอบ
+    if (q.trim()) sp.set("q", q.trim());
+    return `/api/orders_done?${sp.toString()}`;
+  }, [q]);
+
+  const load = useCallback(async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    if (abortRef.current) abortRef.current.abort();
+    const ctr = new AbortController();
+    abortRef.current = ctr;
+
     try {
       setErr("");
-      const params = new URLSearchParams();
-      if (q.trim()) params.set("q", q.trim());
-      params.set("payment", "CHECKING"); // โชว์เฉพาะที่รอตรวจสอบ
-
-      const res = await safeJsonFetch(`/api/orders_done?${params.toString()}`, { signal });
-      if (res.ok) setItems(res.items || []);
+      const res = await fetchJSONWithETag(url, { signal: ctr.signal });
+      if (res?.ok) {
+        const list  = Array.isArray(res.items) ? res.items : [];
+        const next  = fpList(list);
+        if (next !== lastFpRef.current) {
+          lastFpRef.current = next;
+          setItems(list);
+        }
+      }
     } catch (e) {
-      if (e?.name === "AbortError") return; // ถูกยกเลิก ไม่ต้องโชว์ error
-      setErr(e.message || "โหลดข้อมูลไม่สำเร็จ");
+      if (e?.name !== "AbortError") setErr(e.message || "โหลดข้อมูลไม่สำเร็จ");
+    } finally {
+      if (abortRef.current === ctr) abortRef.current = null;
+      loadingRef.current = false;
     }
-  };
+  }, [url]);
 
-  // ✅ ค้นหาอัตโนมัติด้วย debounce 350ms (รวมทั้งครั้งแรก) และ dependency *คงที่เสมอ* เป็น [q]
+  // โหลดครั้งแรก + เมื่อ q เปลี่ยน (debounce 350ms)
   useEffect(() => {
-    const ctr = new AbortController();
-    const h = setTimeout(() => load(ctr.signal), 350);
-    return () => {
-      ctr.abort();
-      clearTimeout(h);
-    };
-  }, [q]);
+    const t = setTimeout(() => load(), 350);
+    return () => clearTimeout(t);
+  }, [load]);
+
+  // โพลลิ่งเบา ๆ ทุก 6s เฉพาะตอนแท็บโฟกัส
+  useEffect(() => {
+    let timer;
+    const start = () => { if (!timer) timer = setInterval(() => { if (!document.hidden) load(); }, 6000); };
+    const stop  = () => { if (timer) { clearInterval(timer); timer = null; } };
+    start();
+    const onVis = () => document.hidden ? stop() : start();
+    document.addEventListener("visibilitychange", onVis);
+    return () => { stop(); document.removeEventListener("visibilitychange", onVis); };
+  }, [load]);
 
   const totalSum = useMemo(
     () => items.reduce((s, it) => s + Number(it.total || 0), 0),
@@ -144,7 +168,7 @@ export default function OrdersDonePage() {
           </div>
         </div>
 
-        {/* กล่องค้นหา — ไม่มีสปิน/ปุ่มแล้ว */}
+        {/* กล่องค้นหา */}
         <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor">
             <circle cx="11" cy="11" r="8" />
@@ -155,6 +179,7 @@ export default function OrdersDonePage() {
             onChange={(e) => setQ(e.target.value)}
             placeholder="ค้นหา: เลขออเดอร์/เลขโต๊ะ"
             className="w-64 outline-none text-sm"
+            onKeyDown={(e) => { if (e.key === "Enter") load(); }}
           />
         </div>
       </div>
@@ -206,11 +231,8 @@ export default function OrdersDonePage() {
                   </td>
                   <td className="py-3 px-3 md:px-4 whitespace-nowrap text-slate-700">
                     {new Date(it.closed_at).toLocaleString("th-TH", {
-                      year: "numeric",
-                      month: "2-digit",
-                      day: "2-digit",
-                      hour: "2-digit",
-                      minute: "2-digit",
+                      year: "numeric", month: "2-digit", day: "2-digit",
+                      hour: "2-digit", minute: "2-digit",
                     })}
                   </td>
                   <td className="py-3 px-3 md:px-4 text-center">

@@ -32,10 +32,63 @@ function normalizeItemStatus(s) {
   return v;
 }
 
-const fetcher = (url) =>
-  fetch(url, { credentials: "include", cache: "no-store" }).then((r) => r.json());
-
 function clsx(...a) { return a.filter(Boolean).join(" "); }
+
+/* ------------------------------------------------
+   Fingerprint & ETag cache (ต่อให้ API ไม่ส่ง ETag เราก็กันรีได้)
+------------------------------------------------ */
+const etagCache = new Map(); // key -> { etag, data, fp }
+
+// ทำ fingerprint แบบเบา ๆ จาก orders เพื่อตรวจว่าข้อมูลเปลี่ยนจริงไหม
+function fpOrders(list) {
+  if (!Array.isArray(list)) return "";
+  const parts = [];
+  for (const o of list) {
+    parts.push(`${o.id}|${o.status}|${o.payment_status}|${o.closed_at || ""}`);
+    const items = Array.isArray(o.items) ? o.items : [];
+    for (const it of items) {
+      const s = normalizeItemStatus(it?.status);
+      parts.push(`i${it.id}:${s}:${it.qty}`);
+    }
+  }
+  return parts.join(";");
+}
+
+// fetcher ที่ฉลาด: รองรับ ETag + คืน reference เดิมเมื่อเนื้อหาไม่เปลี่ยน
+async function fetcherETag(key) {
+  const cached = etagCache.get(key) || {};
+  const headers = {};
+  if (cached.etag) headers["If-None-Match"] = cached.etag;
+
+  const res = await fetch(key, { credentials: "include", cache: "no-store", headers });
+
+  // ถ้า 304 → คืน reference เดิมทันที
+  if (res.status === 304 && cached.data) {
+    return cached.data;
+  }
+
+  const json = await res.json().catch(() => null);
+
+  // ถ้า API ไม่ ok ก็ส่งต่อไปให้ UI handle
+  if (!json?.ok) return json;
+
+  // ถ้า API ส่ง ETag ให้ cache
+  const etag = res.headers.get("etag") || null;
+  const nextData = json;
+
+  // fingerprint เชิงเนื้อหา
+  const nextFp = fpOrders(Array.isArray(nextData?.data) ? nextData.data : []);
+  const prevFp = cached.fp;
+
+  // ถ้าไม่มี ETag แต่เนื้อหาไม่เปลี่ยน → คืน reference เดิม
+  if (!etag && prevFp && prevFp === nextFp && cached.data) {
+    return cached.data;
+  }
+
+  // อัปเดตแคช
+  etagCache.set(key, { etag, data: nextData, fp: nextFp });
+  return nextData;
+}
 
 /* ------------------------------------------------
    Portal + Body scroll lock + Modal shell
@@ -110,8 +163,13 @@ export default function KitchenOrdersPage() {
     return u.toString();
   }, [tab, q]);
 
-  const { data, isLoading, mutate } = useSWR(url, fetcher, {
-    refreshInterval: 10_000, revalidateOnFocus: true,
+  const { data, isLoading, mutate } = useSWR(url, fetcherETag, {
+    refreshInterval: 10_000,
+    revalidateOnFocus: true,
+    refreshWhenHidden: false,  // ⛔ ไม่โพลตอนแท็บไม่โฟกัส
+    keepPreviousData: true,    // รักษาข้อมูลเก่าไว้ระหว่างรีเฟตช์
+    // ถ้าคุณใช้ SWR v2+ และอยากกันการอัปเดตซ้ำซ้อนอีกชั้น:
+    // compare: (a, b) => fpOrders(a?.data || []) === fpOrders(b?.data || []),
   });
 
   const orders = data?.ok ? (data.data || []) : [];
@@ -146,6 +204,17 @@ export default function KitchenOrdersPage() {
         alert(json?.error || "อัปเดตไม่สำเร็จ");
         return snapshot;
       }
+
+      // อัปเดต etagCache สำหรับ url นี้ด้วย เพื่อความเสถียรของ reference
+      const key = url;
+      const cached = etagCache.get(key);
+      if (cached) {
+        const newData = { ...patch };
+        cached.data = newData;
+        cached.fp = fpOrders(newData.data || []);
+        etagCache.set(key, cached);
+      }
+
       return patch;
     }, { revalidate: true });
   }
@@ -187,6 +256,17 @@ export default function KitchenOrdersPage() {
         alert(json?.error || "อัปเดตรายการไม่สำเร็จ");
         return snapshot;
       }
+
+      // sync etagCache เช่นกัน
+      const key = url;
+      const cached = etagCache.get(key);
+      if (cached) {
+        const newData = { ...patch };
+        cached.data = newData;
+        cached.fp = fpOrders(newData.data || []);
+        etagCache.set(key, cached);
+      }
+
       return patch;
     }, { revalidate: true });
   }

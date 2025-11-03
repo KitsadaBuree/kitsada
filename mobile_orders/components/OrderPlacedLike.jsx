@@ -29,25 +29,16 @@ const statusText = {
   served: "เสิร์ฟแล้ว",
   canceled: "ยกเลิก",
 };
-
 const norm = (v) => String(v || "").toLowerCase();
 
-/** แปลง service_rate เป็น “ตัวคูณ” 0–1 อย่างปลอดภัย
- *  ตัวอย่างที่รองรับ:
- *   - 0.1   -> 0.1      (10%)
- *   - 2.5   -> 0.025    (2.5%)
- *   - 10    -> 0.10     (10%)
- *   - 100   -> 1.0      (100%)
- *   - >100  -> 1.0      (cap)
- *   - <0    -> 0
- */
+/** แปลง service_rate เป็นตัวคูณ 0–1 อย่างปลอดภัย */
 function normalizeRate(raw) {
   const n = Number(String(raw).replace(/[^\d.\-]/g, ""));
   if (!Number.isFinite(n)) return 0;
   if (n <= 0) return 0;
-  if (n <= 1) return n;         // ค่าที่เป็นตัวคูณอยู่แล้ว เช่น 0.1
-  if (n <= 100) return n / 100; // ค่าที่เป็นเปอร์เซ็นต์ เช่น 2.5/10/100
-  return 1;                     // เกิน 100% ก็ปัก 100%
+  if (n <= 1) return n;
+  if (n <= 100) return n / 100;
+  return 1;
 }
 
 function deriveOrderNumbers(order, items) {
@@ -76,11 +67,9 @@ async function fetchSettingsRate() {
   try {
     const r = await fetch("/api/settings", { cache: "no-store" });
     const j = await r.json().catch(() => ({}));
-    if (r.ok && j?.ok) {
-      return normalizeRate(j?.data?.service_rate);
-    }
+    if (r.ok && j?.ok) return normalizeRate(j?.data?.service_rate);
   } catch {}
-  return 0; // ถ้าดึงไม่ได้ ให้ถือว่า 0
+  return 0;
 }
 
 async function fetchByCode(orderCode) {
@@ -90,60 +79,89 @@ async function fetchByCode(orderCode) {
   return j.data; // { order, items }
 }
 
-async function listByTable(tableNo) {
-  const r = await fetch(`/api/orders/by-table?table_no=${encodeURIComponent(tableNo)}&limit=50`, { cache: "no-store" });
+async function listByTable(tableNo, { etag } = {}) {
+  const headers = {};
+  if (etag) headers["If-None-Match"] = etag;
+  const r = await fetch(`/api/orders/by-table?table_no=${encodeURIComponent(tableNo)}&limit=50`, {
+    cache: "no-store",
+    headers,
+  });
+  if (r.status === 304) return { unchanged: true, etag: headers["If-None-Match"], data: null };
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j?.ok) throw new Error(j?.error || `HTTP ${r.status}`);
-  return Array.isArray(j.data) ? j.data : [];
+  return { unchanged: false, etag: r.headers.get("etag") || null, data: Array.isArray(j.data) ? j.data : [] };
+}
+
+// fingerprint เบา ๆ
+function fingerprint(order, items, orderAgg) {
+  const parts = [];
+  parts.push(order?.order_code || "");
+  parts.push(order?.status || "");
+  parts.push(order?.payment_status || "");
+  parts.push(orderAgg?.subtotal ?? "");
+  parts.push(orderAgg?.discount ?? "");
+  parts.push(orderAgg?.service_charge ?? "");
+  parts.push(orderAgg?.total ?? "");
+  for (const it of items || []) {
+    parts.push(`${it.id || it.product_id || ""}:${it.qty || 0}:${it.status || ""}:${it.unit_price || ""}`);
+  }
+  return parts.join("|");
 }
 
 export default function OrderPlacedLike({ code, tableFromQR, onCloseHref = "/orders" }) {
-  const router = useRouter();
+  const router = useRouter(); // ✅ ตัวเดียวพอ
 
   const [state, setState] = useState(null); // { items, orderAgg, status, effRatePct, orderCode, table }
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+
   const pollRef = useRef(null);
+  const firstLoadRef = useRef(true);
+  const etagRef = useRef(null);
+  const lastFpRef = useRef("");
+  const inflightRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function load() {
+    const load = async (isFirst = false) => {
       try {
-        if (!cancelled) { setLoading(true); setError(""); }
+        if (isFirst) { setLoading(true); setError(""); }
+        if (document.hidden || !navigator.onLine) return;
+
+        if (inflightRef.current) inflightRef.current.abort();
+        inflightRef.current = new AbortController();
 
         const table =
           tableFromQR ||
           (typeof window !== "undefined" ? localStorage.getItem("table_name") : "") ||
           "";
 
-        // ตัดสินใจว่าจะดูบิลไหน
+        // เลือกออเดอร์
         let chosenCode = code || null;
         if (!chosenCode && table) {
-          const list = (await listByTable(table))
+          const listRes = await listByTable(table, { etag: etagRef.current });
+          if (!listRes.unchanged) etagRef.current = listRes.etag;
+          const list = (listRes.data || [])
             .filter((o) => (o.payment_status || "UNPAID").toUpperCase() !== "PAID")
             .sort((a, b) => {
               const ta = new Date(a.created_at || a.createdAt || 0).getTime();
               const tb = new Date(b.created_at || b.createdAt || 0).getTime();
-              return tb - ta; // ล่าสุดก่อน
+              return tb - ta;
             });
           if (list[0]?.order_code) chosenCode = list[0].order_code;
         }
         if (!chosenCode) throw new Error("ยังไม่พบออเดอร์ของโต๊ะนี้");
 
-        // ดึงรายละเอียดบิล
-        const detail = await fetchByCode(chosenCode); // { order, items }
+        // รายละเอียดออเดอร์
+        const detail = await fetchByCode(chosenCode);
         const order  = detail?.order || {};
         const items  = detail?.items || [];
 
-        // 1) พยายามใช้ service_rate จากบิลก่อน
-        // 2) ถ้าในบิลไม่มี/ว่าง ให้ fallback เป็นค่าจาก settings
+        // หา rate
         let rate = normalizeRate(order?.service_rate);
-        if (!rate) {
-          const settingsRate = await fetchSettingsRate();
-          rate = normalizeRate(settingsRate);
-        }
+        if (!rate) rate = normalizeRate(await fetchSettingsRate());
 
         const nums   = deriveOrderNumbers(order, items);
         const base   = Number(nums.base || 0);
@@ -158,30 +176,56 @@ export default function OrderPlacedLike({ code, tableFromQR, onCloseHref = "/ord
           total:    Number(total.toFixed(2)),
         };
 
-        if (!cancelled) {
+        const fp = fingerprint(order, items, orderAgg);
+
+        // อัปเดตเฉพาะเมื่อเปลี่ยนจริง
+        if (!cancelled && fp !== lastFpRef.current) {
+          lastFpRef.current = fp;
           setState({
             items,
             orderAgg,
-            status: nums.status,          // "ready" เมื่อเมนูทั้งหมดพร้อม
-            effRatePct: rate * 100,       // สำหรับโชว์เป็น %
+            status: nums.status,
+            effRatePct: rate * 100,
             orderCode: order?.order_code || chosenCode,
             table: table || null,
           });
         }
-      } catch (e) {
-        if (!cancelled) setError(e.message || "โหลดข้อมูลไม่สำเร็จ");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
 
-    load();
-    // ตั้ง polling และเก็บไว้ใน ref เพื่อหยุดตอน redirect
-    pollRef.current = setInterval(load, POLL_MS);
+        if (isFirst && !cancelled) setLoading(false);
+      } catch (e) {
+        if (!cancelled) {
+          if (firstLoadRef.current) setError(e.message || "โหลดข้อมูลไม่สำเร็จ");
+          if (isFirst) setLoading(false);
+        }
+      }
+    };
+
+    // รอบแรก
+    firstLoadRef.current = true;
+    load(true).finally(() => { firstLoadRef.current = false; });
+
+    // โพลเฉพาะตอนแท็บโฟกัส
+    const startPoll = () => {
+      if (pollRef.current) return;
+      pollRef.current = setInterval(() => load(false), POLL_MS);
+    };
+    const stopPoll = () => {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    };
+
+    startPoll();
+
+    const onVis = () => {
+      if (document.hidden) stopPoll();
+      else { load(false); startPoll(); }
+    };
+    document.addEventListener("visibilitychange", onVis);
 
     return () => {
       cancelled = true;
-      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      stopPoll();
+      document.removeEventListener("visibilitychange", onVis);
+      if (inflightRef.current) inflightRef.current.abort();
     };
   }, [code, tableFromQR]);
 
@@ -191,16 +235,12 @@ export default function OrderPlacedLike({ code, tableFromQR, onCloseHref = "/ord
   const orderCode = state?.orderCode || "";
   const tableName = state?.table || "";
 
-  // ✅ อนุญาตเช็คบิลเมื่อ "พร้อมเสิร์ฟทั้งหมด" เท่านั้น
   const canRequestBill = items.length > 0 && state?.status === "ready" && !submitting;
 
   const onRequestBill = async () => {
     if (!canRequestBill) return;
     setSubmitting(true);
-
-    // หยุด polling ป้องกันกระพริบ/แข่งกัน setState
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-
     try {
       const snapshot = {
         items: items.map(it => ({
@@ -246,7 +286,6 @@ export default function OrderPlacedLike({ code, tableFromQR, onCloseHref = "/ord
               className="px-3 py-1 rounded-full border text-[13px] font-mono"
               style={{ borderColor: "#E9E9EB", color: "#0F172A", background: "#F7F8FA" }}
               aria-label="เลขออเดอร์"
-              title="เลขออเดอร์"
             >
               #{orderCode}
             </span>
