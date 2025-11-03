@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+:root {
+  /* รายการ fallback เป็นภาษาไทยไม่มีหัวเหมือนกัน */
+  --font-sans: "Prompt", system-ui, -apple-system, Segoe UI, Roboto,
+    "Helvetica Neue", Arial, "Noto Sans Thai", "Sarabun", sans-serif;
+}
+
+html,
+body {
+  font-family: var(--font-sans);
+}
