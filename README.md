@@ -10,7 +10,7 @@
 
 ### ทางเลือก A) ใช้ Git (แนะนำ)
 ```bash
-git clone (https://github.com/KitsadaBuree/kitsada.git
+git clone https://github.com/KitsadaBuree/kitsada.git
 cd <project-root>
 ```
 
