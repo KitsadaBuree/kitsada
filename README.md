@@ -1,5 +1,11 @@
 # Restaurant Stack (Docker Compose)
 
+Video นำเสนอ **เว็บไซต์สั่งอาหารออนไลน์ONLINE FOOD ORDERING WEBSITE**
+```bash
+https://drive.google.com/file/d/1QvZ5itn1kyEzOusJ_qX5IHcngAKvFaAD/view?usp=sharing
+```
+[![Watch the video](https://i.sstatic.net/Vp2cE.png)](https://drive.google.com/file/d/1QvZ5itn1kyEzOusJ_qX5IHcngAKvFaAD/view?usp=sharing)
+ 
 สภาพแวดล้อมพร้อมใช้สำหรับ **Mobile**, **Dashboard**, **MySQL 8.0**, และ **phpMyAdmin**  
 ดึงแอปจาก Docker Hub: `veerct/online_food_ordering_mobile` และ `veerct/online_food_ordering_dashboard`  
 รองรับ **seed ข้อมูลอัตโนมัติครั้งแรก** ผ่านโฟลเดอร์ `seed/`
